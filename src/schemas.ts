@@ -8,26 +8,44 @@ export const actionSchema = z.enum(ACTIONS);
 export const roleSchema = z.enum(ROLES);
 export const dispatchStatusSchema = z.enum(DISPATCH_STATUSES);
 
-export const nestedTodoInputSchema: z.ZodType<NestedTodoInputShape> = z.lazy(
-  () =>
-    z
-      .object({
-        id: z.string().min(1).max(64).optional(),
-        content: z.string().min(1).max(240),
-        activeForm: z.string().max(240).optional(),
-        status: statusSchema.optional(),
-        priority: prioritySchema.optional(),
-        dependsOn: z.array(z.string().min(1).max(64)).max(32).optional(),
-        blockedBy: z.array(z.string().min(1).max(64)).max(32).optional(),
-        requires: z.array(z.string().min(1).max(80)).max(32).optional(),
-        notes: z.string().max(500).optional(),
-        assignee: z.string().min(1).max(64).optional(),
-        assigneeRole: z.string().min(1).max(64).optional(),
-        assigneeLabel: z.string().max(240).optional(),
-        children: z.array(nestedTodoInputSchema).max(100).optional(),
-      })
-      .strict(),
-);
+// bb >= 0.40 rejects recursive $ref in agent tool parameter schemas
+// (assertNoRecursiveJsonSchemaReferences), which the previous z.lazy()
+// self-reference emitted. Nesting is unrolled to a fixed maximum depth instead.
+export const MAX_NESTED_TODO_DEPTH = 5;
+
+const nestedTodoBaseFields = () => ({
+  id: z.string().min(1).max(64).optional(),
+  content: z.string().min(1).max(240),
+  activeForm: z.string().max(240).optional(),
+  status: statusSchema.optional(),
+  priority: prioritySchema.optional(),
+  dependsOn: z.array(z.string().min(1).max(64)).max(32).optional(),
+  blockedBy: z.array(z.string().min(1).max(64)).max(32).optional(),
+  requires: z.array(z.string().min(1).max(80)).max(32).optional(),
+  notes: z.string().max(500).optional(),
+  assignee: z.string().min(1).max(64).optional(),
+  assigneeRole: z.string().min(1).max(64).optional(),
+  assigneeLabel: z.string().max(240).optional(),
+});
+
+const buildNestedTodoSchema = (
+  depth: number,
+): z.ZodType<NestedTodoInputShape> => {
+  if (depth <= 1) {
+    return z
+      .object(nestedTodoBaseFields())
+      .strict() as z.ZodType<NestedTodoInputShape>;
+  }
+  return z
+    .object({
+      ...nestedTodoBaseFields(),
+      children: z.array(buildNestedTodoSchema(depth - 1)).max(100).optional(),
+    })
+    .strict() as z.ZodType<NestedTodoInputShape>;
+};
+
+export const nestedTodoInputSchema: z.ZodType<NestedTodoInputShape> =
+  buildNestedTodoSchema(MAX_NESTED_TODO_DEPTH);
 
 export interface NestedTodoInputShape {
   id?: string;

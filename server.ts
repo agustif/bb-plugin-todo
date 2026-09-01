@@ -47,9 +47,11 @@ export default async function plugin(bb: BbPluginApi) {
     description: TOOL_DESCRIPTION,
     instructions:
       "Use the `todo` tool to plan multi-step work and keep the user-visible checklist current. Prefer nested children + dependsOn for ordering. Assign roles (scout/worker/reviewer) and dispatch child BB threads for parallel work. Keep exactly one parent item in_progress unless children are running. After meaningful progress, call todo again (mark/complete/start/dispatch/report) before ending your turn.",
-    experimental_statusLabels: {
-      pending: "Updating todos",
-      completed: "Updated todos",
+    presentation: {
+      label: {
+        pending: "Updating todos",
+        completed: "Updated todos",
+      },
     },
     parameters: todoToolInputSchema,
     async execute(input, ctx) {
