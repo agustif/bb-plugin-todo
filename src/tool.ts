@@ -18,6 +18,7 @@ import {
 import {
   applyReport,
   dispatchTodos,
+  linkTodo,
   parseAssigneeInput,
 } from "./dispatch.js";
 import { formatSnapshotMarkdown } from "./format.js";
@@ -233,6 +234,23 @@ export async function executeTodoTool(
 
   let snapshot = ctx.store.get(ctx.threadId);
   let items = snapshot.items;
+
+  if (action === "link") {
+    if (!input.id || !input.threadId) {
+      return err("link requires `id` and `threadId`.");
+    }
+    const result = await linkTodo({
+      bb: ctx.bb,
+      store: ctx.store,
+      parentThreadId: ctx.threadId,
+      projectId: ctx.projectId,
+      todoId: input.id,
+      threadId: input.threadId,
+      publish: ctx.publish,
+    });
+    if (!result.ok) return err(result.error);
+    return ok(result.snapshot, { changes: result.changes, note: input.note });
+  }
 
   if (action === "dispatch" || action === "dispatch-ready") {
     let ids =

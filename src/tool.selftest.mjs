@@ -14,6 +14,7 @@ import {
 } from "./model.ts";
 import { formatSnapshotMarkdown } from "./format.ts";
 import { executeTodoTool } from "./tool.ts";
+import { applyChildLifecycle } from "./dispatch.ts";
 
 function memoryStore() {
   const map = new Map();
@@ -243,5 +244,210 @@ assert.match(out, /1\/3 complete|1\/3 complete/i);
 
 const md = formatSnapshotMarkdown(store.get("thr_test"));
 assert.match(md, /\*\*a\*\*/);
+
+// link: attach an existing thread as a todo's worker without spawning one.
+{
+  const linkStore = memoryStore();
+  const threads = {
+    thr_worker: { projectId: "proj_test" },
+    thr_worker2: { projectId: "proj_test" },
+    thr_elsewhere: { projectId: "proj_other" },
+    thr_archived: { projectId: "proj_test", archivedAt: 1 },
+    thr_deleted: { projectId: "proj_test", deletedAt: 1 },
+  };
+  const linkCtx = {
+    ...ctx,
+    threadId: "thr_parent",
+    store: linkStore,
+    bb: {
+      sdk: {
+        threads: {
+          get: async ({ threadId }) => {
+            const row = threads[threadId];
+            if (!row) throw new Error("thread not found");
+            return { id: threadId, archivedAt: null, deletedAt: null, ...row };
+          },
+          spawn: async () => {
+            throw new Error("link must not spawn");
+          },
+        },
+      },
+    },
+  };
+  await executeTodoTool(
+    {
+      action: "set",
+      items: [
+        { id: "first", content: "First" },
+        { id: "second", content: "Second", dependsOn: ["first"] },
+        { id: "third", content: "Third" },
+        { id: "done", content: "Done", status: "completed" },
+        { id: "dropped", content: "Dropped", status: "cancelled" },
+      ],
+    },
+    linkCtx,
+  );
+  // Successful calls return markdown; failures return an isError result.
+  const text = (result) =>
+    typeof result === "string" ? result : `ERROR: ${result.content[0].text}`;
+  const link = async (id, threadId) =>
+    text(await executeTodoTool({ action: "link", id, threadId }, linkCtx));
+  const itemOf = (id) =>
+    linkStore.get("thr_parent").items.find((item) => item.id === id);
+
+  assert.match(
+    text(await executeTodoTool({ action: "link", id: "first" }, linkCtx)),
+    /^ERROR: link requires `id` and `threadId`/,
+  );
+  assert.match(await link("first", "thr_parent"), /^ERROR: .*own worker/);
+  assert.match(await link("first", "thr_missing"), /^ERROR: Could not read thread thr_missing/);
+  assert.match(await link("first", "thr_elsewhere"), /^ERROR: .*different project/);
+  assert.match(await link("first", "thr_archived"), /^ERROR: .*archived/);
+  assert.match(await link("first", "thr_deleted"), /^ERROR: .*deleted/);
+  assert.match(await link("second", "thr_worker"), /^ERROR: .*blocked by: first/);
+  assert.match(await link("done", "thr_worker"), /^ERROR: .*already completed/);
+  assert.match(await link("dropped", "thr_worker"), /^ERROR: .*already cancelled/);
+  assert.match(await link("nope", "thr_worker"), /^ERROR: Unknown id/);
+  assert.equal(itemOf("first").assigneeThreadId, null);
+
+  const linked = await link("first", "thr_worker");
+  assert.match(linked, /linked first → thr_worker/);
+  assert.equal(itemOf("first").status, "in_progress");
+  assert.equal(itemOf("first").assigneeThreadId, "thr_worker");
+  assert.equal(itemOf("first").dispatchStatus, "running");
+  assert.equal(itemOf("first").assigneeRole, "worker");
+  assert.equal(publishes.at(-1), "thr_parent");
+
+  assert.match(await link("first", "thr_worker2"), /^ERROR: .*already linked to thr_worker; release it first/);
+  assert.match(await link("third", "thr_worker"), /^ERROR: .*already the worker for todo first/);
+
+  // The linked thread reports like a dispatched child.
+  const report = text(
+    await executeTodoTool(
+      { action: "report", status: "completed", summary: "Shipped" },
+      { ...linkCtx, threadId: "thr_worker" },
+    ),
+  );
+  assert.match(report, /report first → completed/);
+  assert.equal(itemOf("first").status, "completed");
+  assert.equal(itemOf("first").lastReport, "Shipped");
+
+  // Releasing frees the thread for another todo.
+  await executeTodoTool({ action: "release", id: "first" }, linkCtx);
+  assert.match(await link("third", "thr_worker"), /linked third → thr_worker/);
+}
+
+// dispatch holds a todo while its worker spawns, and saves only that todo
+// afterwards, so links and edits made during the spawn are kept.
+{
+  const raceStore = memoryStore();
+  const spawns = [];
+  const raceCtx = {
+    ...ctx,
+    threadId: "thr_parent",
+    store: raceStore,
+    bb: {
+      sdk: {
+        threads: {
+          get: async ({ threadId }) => ({
+            id: threadId,
+            projectId: "proj_test",
+            environmentId: null,
+            providerId: "test",
+            archivedAt: null,
+            deletedAt: null,
+          }),
+          // Each spawn waits until the test resolves it.
+          spawn: () =>
+            new Promise((resolve, reject) => {
+              spawns.push((id, error) => (error ? reject(error) : resolve({ id })));
+            }),
+        },
+      },
+    },
+  };
+  const text = (result) =>
+    typeof result === "string" ? result : `ERROR: ${result.content[0].text}`;
+  const run = async (input) => text(await executeTodoTool(input, raceCtx));
+  const itemOf = (id) =>
+    raceStore.get("thr_parent").items.find((item) => item.id === id);
+  // Wait until a dispatch call reaches its pending spawn.
+  const spawnStarted = async (count) => {
+    while (spawns.length < count) await new Promise((r) => setImmediate(r));
+  };
+  await run({
+    action: "set",
+    items: [
+      { id: "a", content: "A", assignee: "worker" },
+      { id: "b", content: "B" },
+      { id: "c", content: "C", assignee: "worker" },
+      { id: "d", content: "D", assignee: "worker" },
+      { id: "e", content: "E", assignee: "worker" },
+    ],
+  });
+
+  // A link to another todo during the spawn survives the dispatch save.
+  const dispatchA = run({ action: "dispatch", id: "a" });
+  await spawnStarted(1);
+  assert.match(await run({ action: "link", id: "b", threadId: "thr_w" }), /linked b → thr_w/);
+  // The todo being dispatched cannot be linked or dispatched again meanwhile.
+  assert.match(await run({ action: "link", id: "a", threadId: "thr_x" }), /^ERROR: .*a is being dispatched/);
+  assert.match(await run({ action: "dispatch", id: "a" }), /a is being dispatched/);
+  spawns[0]("thr_n");
+  assert.match(await dispatchA, /dispatched a → thr_n/);
+  assert.equal(itemOf("a").assigneeThreadId, "thr_n");
+  assert.equal(itemOf("b").assigneeThreadId, "thr_w");
+  assert.equal(raceStore.findByChildThread("thr_w").item.id, "b");
+  assert.equal(raceStore.findByChildThread("thr_n").item.id, "a");
+  assert.equal(spawns.length, 1, "the refused dispatch did not spawn");
+
+  // If the todo is closed during the spawn, the result names the untracked
+  // worker instead of reopening the todo.
+  const dispatchC = run({ action: "dispatch", id: "c" });
+  await spawnStarted(2);
+  await run({ action: "cancel", id: "c" });
+  spawns[1]("thr_late");
+  assert.match(await dispatchC, /c is now cancelled, so worker thr_late was started but is not tracked/);
+  assert.equal(itemOf("c").status, "cancelled");
+  assert.equal(itemOf("c").assigneeThreadId, null);
+  assert.equal(raceStore.findByChildThread("thr_late"), null);
+  // A failed spawn releases the hold, so the todo can be linked.
+  const dispatchD = run({ action: "dispatch", id: "d" });
+  await spawnStarted(3);
+  spawns[2](null, new Error("spawn refused"));
+  assert.match(await dispatchD, /Failed to dispatch d: spawn refused/);
+  assert.match(await run({ action: "link", id: "d", threadId: "thr_y" }), /linked d → thr_y/);
+
+  // Redispatching after the worker went idle or failed replaces it, as before:
+  // the unchanged earlier assignment is not a conflict.
+  const lifecycle = (childThreadId, outcome) =>
+    applyChildLifecycle({ store: raceStore, childThreadId, outcome, publish: () => {} });
+  const redispatch = async (oldWorker, outcome, newWorker) => {
+    lifecycle(oldWorker, outcome);
+    assert.equal(itemOf("a").dispatchStatus, outcome);
+    assert.equal(itemOf("a").assigneeThreadId, oldWorker);
+    const pending = run({ action: "dispatch", id: "a" });
+    const index = spawns.length;
+    await spawnStarted(index + 1);
+    spawns[index](newWorker);
+    assert.match(await pending, new RegExp(`dispatched a → ${newWorker}`));
+    assert.equal(itemOf("a").assigneeThreadId, newWorker);
+    assert.equal(itemOf("a").dispatchStatus, "running");
+    assert.equal(raceStore.findByChildThread(newWorker).item.id, "a");
+    assert.equal(raceStore.findByChildThread(oldWorker), null);
+  };
+  await redispatch("thr_n", "idle", "thr_n2");
+  await redispatch("thr_n2", "failed", "thr_n3");
+
+  // A todo removed during the spawn is not recreated; the worker is named.
+  const dispatchE = run({ action: "dispatch", id: "e" });
+  const indexE = spawns.length;
+  await spawnStarted(indexE + 1);
+  await run({ action: "remove", id: "e" });
+  spawns[indexE]("thr_gone");
+  assert.match(await dispatchE, /e was removed, so worker thr_gone was started but is not tracked/);
+  assert.equal(itemOf("e"), undefined);
+  assert.equal(raceStore.findByChildThread("thr_gone"), null);
+}
 
 console.log("ok — todo selftest passed");

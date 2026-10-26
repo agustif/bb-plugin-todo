@@ -30,6 +30,7 @@ export const ACTIONS = [
   "assign",
   "dispatch",
   "dispatch-ready",
+  "link",
   "release",
   "report",
 ] as const;

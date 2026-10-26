@@ -12,13 +12,13 @@ Pairs with **[bb-plugin-session-goal](https://github.com/agustif/bb-plugin-sessi
 
 - **One agent tool** named `todo` for list / set / add / update / start /
   complete / cancel / remove / clear / move / depend / mark / assign /
-  dispatch / report
+  dispatch / link / report
 - **Nested trees** via `children` or `parentId` (any depth)
 - **Hard dependencies** (`dependsOn` / `blockedBy`) that auto-surface blocked
   vs ready work
 - **Soft prerequisites** (`requires`: env, approval, docs, …)
 - **Multi-agent** — assign `scout` / `worker` / `reviewer`, dispatch child
-  threads, children `report` back
+  threads or `link` threads that already exist, children `report` back
 - **Composer banner** with progress + expandable tree (and a header badge)
 - **Rich tool feedback** so the model always sees the tree, blockers, and
   “ready next” without guessing ids
